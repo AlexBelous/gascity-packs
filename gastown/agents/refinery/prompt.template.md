@@ -58,6 +58,14 @@ the quality-gate intent even when pack-specific guidance is missing.
 
 ---
 
+The claim protocol can take up to 165 seconds (native work-query budget is 150s).
+Allow at least 180 seconds for each claim in the caller; a startup with two claims
+or other work may need longer. A caller timeout has an unknown outcome: do not
+manually repeat hook claim, pour, burn, or clear the journal. Inspect first.
+A pending burn/claim can only be reconciled with guarded `recover`, supplying
+both the recorded --completed-current and --expected-next IDs. Recovery never
+pours or burns; it preserves the original journal and verifies the successor.
+
 Before each `next` command, replace `<confirmed-current-id>` with the ID returned
 by `startup` for the patrol you actually completed (or the verified NEXT receipt
 when beginning its new cycle). Retain that same ID when retrying the command;

@@ -15,7 +15,7 @@ class ReconcileNeeded(Exception):
 
 
 def gc(*args, protocol=False):
-    result = subprocess.run(["gc", *args], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["gc", *args], capture_output=True, text=True, timeout=165 if protocol else 30)
     if result.returncode and not protocol:
         raise ReconcileNeeded(f"gc {' '.join(args)} failed: {result.stderr.strip()}")
     try:
@@ -137,19 +137,106 @@ def run(mode, actor, identities, binding_prefix, checkpoint,
                             capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise ReconcileNeeded(f"could not retire {current}; queued successor is {next_bead}")
+    checkpoint({"pending": True, "phase": "claim", "current": current, "next": next_bead})
     claimed = gc("hook", "--claim", "--json", protocol=True)
     if claimed != next_bead:
         raise ReconcileNeeded(f"successor {next_bead} was not claimed after retirement")
     return {"action": "advanced", "current": current, "next": next_bead}
 
 
+def recovery_current():
+    result = subprocess.run(["gc", "hook", "current", "--id-only"],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    expected = (f"gc hook current: session {os.environ['GC_SESSION_ID']} has no current claim "
+                "(nothing claimed through gc hook --claim)")
+    if result.returncode == 1 and not result.stdout.strip() and result.stderr.strip() == expected:
+        return None
+    raise ReconcileNeeded("cannot establish recovery session claim")
+
+
+def require_retired(bead):
+    result = subprocess.run(["gc", "bd", "--readonly", "show", bead, "--json"],
+                            capture_output=True, text=True, timeout=30)
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as exc:
+        raise ReconcileNeeded("retired patrol lookup is not authoritative NotFound") from exc
+    if (result.returncode != 1 or not isinstance(data, dict)
+            or type(data.get("schema_version")) is not int or data["schema_version"] != 1
+            or data.get("error") != "no issues found matching the provided IDs"
+            or f'no issue found matching "{bead}"' not in result.stderr):
+        raise ReconcileNeeded("old patrol still exists or its absence cannot be established")
+    return {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+
+
+def write_evidence(path, data):
+    # Exclusive, durable evidence: never overwrite the original pending journal.
+    with path.open("x") as handle:
+        json.dump(data, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def recover(state, state_path, identities, formula, completed, expected_next):
+    if (state.get("pending") is not True or state.get("phase") not in ("burn", "claim")
+            or not completed or not expected_next or completed == expected_next
+            or state.get("current") != completed or state.get("next") != expected_next
+            or state.get("formula", formula) != formula):
+        raise ReconcileNeeded("recovery IDs/formula do not match a pending retirement")
+    absence = require_retired(completed)
+    rows = inventory(identities)
+    if len(rows) != 1 or select(rows, expected_next, formula) is not None:
+        raise ReconcileNeeded("recovery needs exactly one verified owned successor")
+    current = recovery_current()
+    if current not in (None, completed, expected_next):
+        raise ReconcileNeeded("recovery session claim points to unrelated work")
+    original = state_path.read_bytes()
+    key = hashlib.sha256(original).hexdigest()
+    archive = state_path.with_name(state_path.name + "." + key + ".original")
+    if archive.exists():
+        if archive.read_bytes() != original:
+            raise ReconcileNeeded("original recovery journal archive mismatch")
+    else:
+        with archive.open("xb") as handle:
+            handle.write(original)
+            handle.flush()
+            os.fsync(handle.fileno())
+    attempt = archive.with_suffix(".attempt.json")
+    if current != expected_next:
+        if attempt.exists():
+            raise ReconcileNeeded("prior recovery claim outcome is unknown; do not retry manually")
+        write_evidence(attempt, {"original": str(archive), "formula": formula,
+                                "old_not_found": absence, "inventory": rows,
+                                "claim_before": current, "claim_attempted": True})
+        claimed = gc("hook", "--claim", "--json", protocol=True)
+        if claimed != expected_next:
+            raise ReconcileNeeded("recovery claim did not return the recorded successor")
+    if recovery_current() != expected_next:
+        raise ReconcileNeeded("recovery successor claim readback failed")
+    # Recheck the store after claim. No recovery path pours or burns anything.
+    require_retired(completed)
+    rows = inventory(identities)
+    if len(rows) != 1 or select(rows, expected_next, formula) is not None:
+        raise ReconcileNeeded("recovery inventory changed after claim")
+    result = {"action": "advanced", "current": completed, "next": expected_next,
+              "recovered": True, "original_journal": str(archive)}
+    evidence = archive.with_suffix(".verified.json")
+    if not evidence.exists():
+        write_evidence(evidence, {"result": result, "inventory": rows,
+                                  "claim_after": expected_next})
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("startup", "next"))
+    parser.add_argument("mode", choices=("startup", "next", "recover"))
     parser.add_argument("--binding-prefix", default="")
     parser.add_argument("--formula", choices=("mol-witness-patrol", "mol-refinery-patrol"),
                         default="mol-witness-patrol")
     parser.add_argument("--completed-current")
+    parser.add_argument("--expected-next")
     parser.add_argument("--target-branch")
     parser.add_argument("--rig-name")
     args = parser.parse_args()
@@ -183,27 +270,35 @@ def main():
                 state = json.loads(state_path.read_text())
             except ValueError as exc:
                 raise ReconcileNeeded(f"invalid transition journal: {state_path}") from exc
-            if not isinstance(state, dict) or state.get("pending") is not False:
+            if (not isinstance(state, dict)
+                    or (state.get("pending") is not False and args.mode != "recover")):
                 raise ReconcileNeeded(f"unfinished transition; inspect {state_path} before retry")
 
         previous = state.get("result", {})
         if not isinstance(previous, dict):
             raise ReconcileNeeded("invalid transition receipt; preserve the journal")
-        if (args.mode == "next" and state.get("formula") == args.formula
+        if (state.get("pending") is False
+                and args.mode in ("next", "recover") and state.get("formula") == args.formula
                 and previous.get("action") == "advanced"
-                and previous.get("current") == args.completed_current):
+                and previous.get("current") == args.completed_current
+                and (args.mode != "recover" or previous.get("next") == args.expected_next)):
             print(json.dumps(dict(previous, replayed=True)))
             return
 
         def checkpoint(state):
             # Persist before mutation: crash/timeout must not trigger a second pour.
+            state = dict(state, formula=args.formula)
             with state_path.open("w") as handle:
                 json.dump(state, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
 
-        result = run(args.mode, actor, identities, args.binding_prefix, checkpoint,
-                     args.formula, refinery_vars, args.completed_current)
+        if args.mode == "recover":
+            result = recover(state, state_path, identities, args.formula,
+                             args.completed_current, args.expected_next)
+        else:
+            result = run(args.mode, actor, identities, args.binding_prefix, checkpoint,
+                         args.formula, refinery_vars, args.completed_current)
         checkpoint({"pending": False, "formula": args.formula, "result": result})
         print(json.dumps(result))
 
