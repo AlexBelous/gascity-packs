@@ -214,6 +214,21 @@ if verify >= metadata:
 PY
 }
 
+test_dolt_endpoint_discovery_contract() {
+    local awareness="$GASTOWN/template-fragments/operational-awareness.template.md"
+    ! grep -F 'port 3307' "$awareness" >/dev/null ||
+        fail "operational awareness must not hardcode a Dolt port"
+    grep -F 'gc dolt status' "$awareness" >/dev/null ||
+        fail "operational awareness should direct agents to the effective Dolt port"
+    grep -F 'Never probe a guessed or fixed Dolt port.' "$awareness" >/dev/null ||
+        fail "operational awareness must forbid guessed Dolt endpoints"
+    grep -F 'configured endpoint and the exact probe target' "$awareness" >/dev/null ||
+        fail "operational awareness must require configured and probed endpoint evidence"
+    grep -F 'endpoint is unknown and stop' "$awareness" >/dev/null ||
+        fail "operational awareness must fail closed when endpoint discovery fails"
+}
+
+test_dolt_endpoint_discovery_contract
 test_dog_assets_are_pack_local
 test_retired_dog_formulas_are_not_reintroduced
 test_shutdown_dance_contracts_are_executable
