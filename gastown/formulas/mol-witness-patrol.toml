@@ -1,8 +1,7 @@
 description = """
-Witness patrol loop. Poured as a root-only wisp on startup:
-
-  gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}'
-  gc bd update $WISP --assignee=$GC_AGENT
+Witness patrol loop. The pack's witness-patrol startup command claims an
+existing patrol or creates one root-only wisp after authoritative no_work and
+an empty owned inventory. Do not bootstrap with a separate manual pour.
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
 iteration. On crash, re-read the formula steps and determine where
@@ -500,37 +499,36 @@ description = """
 
 End of patrol cycle. Pour the next iteration, then wait or exit.
 
-**1. Context check:**
+**1. Confirm this patrol is complete, then advance safely:**
 
-If context feels heavy or RSS is high:
+Run the pack's serialized transition command. It reads the session's current
+claim and an infrastructure-inclusive inventory. An open current wisp is never
+its own NEXT. Multiple candidates, unknown current, failed reads, and partial
+transitions produce RECONCILE_NEEDED; preserve all molecules and report the
+blocker. Never burn surplus molecules or retry a pour outside this command.
+
 ```bash
-gc runtime request-restart
-```
-This blocks forever. The controller restarts you. The next wisp
-is already assigned — the new session resumes from context.
-
-**2. Pour next iteration BEFORE burning (reconcile to exactly one):**
-
-Reuse an already-queued wisp instead of pouring a duplicate. A prior cycle
-may have poured a next wisp without burning, or a restart may have raced —
-keep one open patrol wisp and burn any surplus, so wisps never accumulate.
-Wisp roots are `issue_type=molecule` (never `--type=wisp`, which is not a
-valid bd type and matches nothing).
-```bash
-OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')
-NEXT=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')
-for extra in $(printf '%s\n' $OPEN_WISPS | sed '1d'); do
-  gc bd mol burn "$extra" --force
-done
-if [ -z "$NEXT" ]; then
-  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
-  gc bd update "$NEXT" --assignee="$GC_AGENT"
+binding='{{binding_prefix}}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" witness-patrol next --binding-prefix "$binding"
+else
+  gc witness-patrol next
 fi
 ```
 
-**3. Burn this wisp:**
+**2. Check the result:**
+
+Only a successful `advanced` result means that a distinct successor was verified
+and the completed current wisp was retired. Do not issue another burn. If the
+command failed, do not proceed to idle/restart; report RECONCILE_NEEDED with its
+evidence so the transition journal can be reconciled.
+
+**3. Context check:**
+
+If context feels heavy or RSS is high, request restart only after a successful
+transition; the verified next wisp is already assigned:
 ```bash
-gc bd mol burn <this-wisp-id> --force
+gc runtime request-restart
 ```
 
 **4. Exit this turn:**

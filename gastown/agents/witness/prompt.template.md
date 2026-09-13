@@ -161,30 +161,21 @@ never filter `--type=wisp` (not a valid bd type — the query errors and matches
 nothing).
 
 ```bash
-# Step 1: Reconcile your patrol wisps to exactly one (town ledger, via gc bd).
-# Collect every open/in_progress patrol wisp assigned to you, keep one, and
-# burn the surplus so restarts never accumulate duplicates. Wisp roots are
-# molecules — filter --type=molecule, never --type=wisp.
-WISP_IDS=$(
-  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=0 --json | jq -r '.[].id'
-  gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id'
-)
-WISP=$(printf '%s\n' $WISP_IDS | sed -n '1p')           # keep one (prefers in_progress)
-for extra in $(printf '%s\n' $WISP_IDS | sed '1d'); do  # burn any surplus
-  gc bd mol burn "$extra" --force
-done
-
-# Step 2: Already have a wisp? Resume it. Otherwise check mail, then pour ONE.
-if [ -n "$WISP" ]; then
-  echo "Resuming patrol wisp $WISP"
+binding='{{ .BindingPrefix }}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" witness-patrol startup --binding-prefix "$binding"
 else
-  gc mail inbox
-  WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id')
-  gc bd update "$WISP" --assignee="$GC_AGENT"
+  gc witness-patrol startup
 fi
-
-# Step 3: Execute — read formula steps and work through them in order
 ```
+
+Only continue after a successful `resume` result. The command uses the standard
+claim protocol and includes infrastructure molecules in its inventory. It never
+burns surplus molecules. An authoritative empty inventory plus `no_work` may
+bootstrap one patrol; errors and ambiguous assignments stop with
+`RECONCILE_NEEDED`. Report that blocker and preserve the transition journal;
+do not bypass it with manual pour/burn or clear it without reconciling its IDs.
+
 
 **Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
 
@@ -200,47 +191,23 @@ is a bug indicator. Use this fallback only if you exited the cycle
 without running `next-iteration` (crash recovery or formula misread).
 If `next-iteration` already ran, do not pour again; run `gc hook`.
 
+Do not infer completion from a crash or an empty hook. Re-read the formula and
+finish the outstanding steps first. Only after the current patrol is complete:
+
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
+binding='{{ .BindingPrefix }}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" witness-patrol next --binding-prefix "$binding"
+else
+  gc witness-patrol next
 fi
-# Reconcile queued (open) patrol wisps to exactly one. A prior cycle may have
-# poured a next wisp without burning, or a restart may have raced — keep the
-# first and burn the surplus so wisps never accumulate. Wisp roots are
-# molecules (never --type=wisp, which is not a valid bd type and matches
-# nothing).
-OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')
-ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')
-for extra in $(printf '%s\n' $OPEN_WISPS | sed '1d'); do
-  gc bd mol burn "$extra" --force
-done
-if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then
-  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
-  if [ -z "$NEXT" ]; then
-    echo "Could not pour next witness wisp; not burning."
-    exit 1
-  fi
-  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-    echo "Could not assign next witness wisp; not burning."
-    exit 1
-  fi
-  gc bd mol burn "$CURRENT_WISP" --force
-elif [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
-elif [ -z "$ASSIGNED_WISP" ]; then
-  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
-  if [ -z "$NEXT" ]; then
-    echo "Could not bootstrap next witness wisp."
-    exit 1
-  fi
-  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-    echo "Could not assign bootstrap witness wisp."
-    exit 1
-  fi
-fi
-gc hook
 ```
+
+On `RECONCILE_NEEDED`, stop and report the returned reason. The command confirms
+the session's current claim, excludes it from successor selection even when it
+is open, preserves ambiguous molecules, and verifies the successor before
+retiring only the completed current wisp. Do not burn any other molecule.
+
 
 ## Context Exhaustion
 
@@ -321,7 +288,7 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}'` |
+| Advance completed patrol | Use the guarded `witness-patrol next` command above |
 | Context exhaustion | `gc runtime request-restart` |
 | Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
