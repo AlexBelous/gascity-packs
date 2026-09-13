@@ -37,6 +37,17 @@ def gc(*args, protocol=False):
 
 def inventory(identities):
     rows = gc("bd", "list", "--type=molecule", "--include-infra", "--all", "--skip-labels", "--limit=0", "--json")
+    if isinstance(rows, dict):
+        # bd --skip-labels uses a versioned envelope, not the legacy array.
+        meta = rows.get("meta")
+        issues = rows.get("issues")
+        if (type(rows.get("schema_version")) is not int or rows["schema_version"] != 1
+                or not isinstance(meta, dict) or not isinstance(issues, list)
+                or type(meta.get("count")) is not int or meta["count"] != len(issues)
+                or meta.get("skip_labels") is not True
+                or meta.get("has_more") or meta.get("truncated") or meta.get("next_cursor")):
+            raise ReconcileNeeded("molecule inventory envelope is unsupported or incomplete")
+        rows = issues
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ReconcileNeeded("molecule inventory is not an array of records")
     for row in rows:

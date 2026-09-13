@@ -46,7 +46,8 @@ class City:
             assert "--include-infra" in args and "--all" in args and "--skip-labels" in args
             if self.fail_read:
                 return subprocess.CompletedProcess(command, 1, "", "database unavailable")
-            data = self.rows
+            data = {"issues": self.rows, "meta": {"count": len(self.rows), "skip_labels": True},
+                    "schema_version": 1}
         elif args[:3] == ["bd", "mol", "wisp"]:
             self.mutations.append(("pour", "next"))
             self.rows.append(row("next"))
@@ -142,6 +143,31 @@ class PatrolTests(unittest.TestCase):
         with patch.object(patrol.subprocess, "run", return_value=response):
             with self.assertRaises(patrol.ReconcileNeeded):
                 patrol.gc("hook", "--claim", "--json", protocol=True)
+
+    def test_inventory_accepts_observed_envelope_and_filters_other_owner(self):
+        other = row("refinery")
+        other.update(assignee="office-work/gastown.refinery", title="mol-refinery-patrol")
+        envelope = {"schema_version": 1, "issues": [row("current"), other],
+                    "meta": {"count": 2, "skip_labels": True}}
+        with patch.object(patrol, "gc", return_value=envelope):
+            self.assertEqual([item["id"] for item in patrol.inventory({ACTOR})], ["current"])
+
+    def test_inventory_rejects_malformed_or_truncated_envelopes(self):
+        cases = [
+            {},
+            {"schema_version": 1, "issues": [], "meta": {"count": 2, "skip_labels": True}},
+            {"schema_version": 1, "issues": [], "meta": {"count": 0, "skip_labels": False}},
+            {"schema_version": 2, "issues": [], "meta": {"count": 0, "skip_labels": True}},
+            {"schema_version": 1, "issues": [], "meta": {"count": 0, "skip_labels": True, "has_more": True}},
+        ]
+        for envelope in cases:
+            with self.subTest(envelope=envelope), patch.object(patrol, "gc", return_value=envelope):
+                with self.assertRaises(patrol.ReconcileNeeded):
+                    patrol.inventory({ACTOR})
+
+    def test_inventory_keeps_legacy_array_compatibility(self):
+        with patch.object(patrol, "gc", return_value=[row("current")]):
+            self.assertEqual(patrol.inventory({ACTOR}), [row("current")])
 
     def test_pending_journal_blocks_retry_before_any_gc_command(self):
         # Retain the tiny isolated fixture for inspection; never touch a city.
