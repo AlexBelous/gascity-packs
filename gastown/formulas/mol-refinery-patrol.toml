@@ -1,8 +1,14 @@
 description = """
-Refinery patrol loop. Poured as a root-only wisp on startup:
+Refinery patrol loop. Use the pack's refinery-patrol startup command to claim an
+existing patrol or bootstrap after authoritative no_work and an empty owned
+inventory. Preserve target_branch, rig_name and binding_prefix on every next
+transition. Never bypass RECONCILE_NEEDED with raw pour/burn or journal removal.
 
-  gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}}
-  gc bd update $WISP --assignee=$GC_AGENT
+Use the confirmed patrol ID from startup when replacing <confirmed-current-id>
+in next commands. Keep that same ID for retries. Do not refresh the token to the
+new successor just to repeat a transition. Only advance that successor after its
+own cycle has completed. Missing/stale IDs fail closed; a verified duplicate
+returns replayed=true and performs no mutation.
 
 Each wisp is ONE iteration: check for work, merge one branch, pour
 the next iteration. On crash, re-read the formula steps and determine
@@ -117,27 +123,11 @@ If context feels heavy (multi-hour session, large recent diffs, or you notice
 yourself taking shortcuts or summarizing prematurely), pour and assign the next
 wisp, burn the current wisp, then request a restart:
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next refinery wisp; not requesting restart."
-  gc runtime drain-ack
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next refinery wisp; not requesting restart."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+binding='{{binding_prefix}}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 else
-  echo "Could not resolve current wisp; not requesting restart."
-  gc runtime drain-ack
-  exit 1
+  gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 fi
 gc runtime request-restart
 RESTART_STATUS=$?
@@ -240,27 +230,11 @@ gc bd update $WORK \
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
 6. Pour next patrol iteration before burning:
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next refinery wisp; not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next refinery wisp; not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+binding='{{binding_prefix}}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 else
-  echo "Could not resolve current wisp; not burning."
-  gc runtime drain-ack
-  exit 1
+  gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 fi
 ```
 7. Close this step after the current wisp is burned.
@@ -341,27 +315,11 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
-     CURRENT_WISP=${GC_BEAD_ID:-}
-     if [ -z "$CURRENT_WISP" ]; then
-       CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-     fi
-     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
-     if [ -z "$NEXT" ]; then
-       echo "Could not pour next refinery wisp; not burning."
-       gc runtime drain-ack
-       exit 1
-     fi
-     if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-       echo "Could not assign next refinery wisp; not burning."
-       gc runtime drain-ack
-       exit 1
-     fi
-     if [ -n "$CURRENT_WISP" ]; then
-       gc bd mol burn "$CURRENT_WISP" --force
+     binding='{{binding_prefix}}'
+     if [ -n "$binding" ]; then
+       gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
      else
-       echo "Could not resolve current wisp; not burning."
-       gc runtime drain-ack
-       exit 1
+       gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
      fi
      ```
    - Close this step after the current wisp is burned.
@@ -433,36 +391,11 @@ Work bead: $WORK
 Existing PR: $EXISTING_PR
 Branch: $BRANCH
 Target: $TARGET"
-  CURRENT_WISP=${GC_BEAD_ID:-}
-  if [ -z "$CURRENT_WISP" ]; then
-    CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-  fi
-  if [ -z "$CURRENT_WISP" ]; then
-    echo "Could not resolve current wisp; not burning."
-    echo "$reason"
-    echo "STOP. Existing PR metadata needs human correction."
-    gc runtime drain-ack
-    exit 1
-  fi
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
-  if [ -z "$NEXT" ]; then
-    echo "Could not pour next refinery wisp; not burning."
-    gc runtime drain-ack
-    exit 1
-  fi
-  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-    echo "Could not assign next refinery wisp; not burning."
-    gc runtime drain-ack
-    exit 1
-  fi
-  if [ -n "$CURRENT_WISP" ]; then
-    gc bd mol burn "$CURRENT_WISP" --force
+  binding='{{binding_prefix}}'
+  if [ -n "$binding" ]; then
+    gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
   else
-    echo "Could not resolve current wisp; not burning."
-    echo "$reason"
-    echo "STOP. Existing PR metadata needs human correction."
-    gc runtime drain-ack
-    exit 1
+    gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
   fi
   echo "$reason"
   echo "STOP. Existing PR metadata needs human correction."
@@ -1021,7 +954,7 @@ If the cycle ended early (conflict rejection, no work found), note
 why and what state was left.
 
 This summary is not stored separately — it lives in the wisp's
-closing reason. The next session can find it via `gc bd list --type=wisp
+closing reason. The next session can find it via `gc bd list --type=molecule --include-infra --all --skip-labels
 --status=closed --limit=5` if it needs predecessor context."""
 
 [[steps]]
@@ -1056,27 +989,11 @@ If auto_land = "false": skip this entirely.
 
 **2. Resolve the current wisp, pour next iteration, then burn this wisp:**
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next refinery wisp; not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next refinery wisp; not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+binding='{{binding_prefix}}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 else
-  echo "Could not resolve current wisp; not burning."
-  gc runtime drain-ack
-  exit 1
+  gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{target_branch}}" --rig-name "{{rig_name}}" || exit 1
 fi
 ```
 

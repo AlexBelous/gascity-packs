@@ -238,8 +238,8 @@ test_polecat_startup_uses_standard_hook_claim
 test_review_leg_contract_forbids_synthetic_mutation
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 
-! grep -E 'gc bd mol (burn|wisp)' "$GASTOWN/agents/witness/prompt.template.md" "$GASTOWN/formulas/mol-witness-patrol.toml" >/dev/null ||
-    fail "witness instructions must use the guarded transition command"
-python3 -B -m unittest discover -s "$GASTOWN/tests" -p 'test_witness_patrol*.py'
+! grep -E 'gc bd mol (burn|wisp)' "$GASTOWN/agents/witness/prompt.template.md" "$GASTOWN/formulas/mol-witness-patrol.toml" "$GASTOWN/agents/refinery/prompt.template.md" "$GASTOWN/formulas/mol-refinery-patrol.toml" >/dev/null ||
+    fail "patrol instructions must use the guarded transition command"
+python3 -B -m unittest discover -s "$GASTOWN/tests" -p 'test_*patrol*.py'
 
 echo "gastown pack asset tests passed"

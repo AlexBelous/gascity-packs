@@ -3,6 +3,12 @@ Witness patrol loop. The pack's witness-patrol startup command claims an
 existing patrol or creates one root-only wisp after authoritative no_work and
 an empty owned inventory. Do not bootstrap with a separate manual pour.
 
+Use the confirmed patrol ID from startup when replacing <confirmed-current-id>
+in next commands. Keep that same ID for retries. Do not refresh the token to the
+new successor just to repeat a transition. Only advance that successor after its
+own cycle has completed. Missing/stale IDs fail closed; a verified duplicate
+returns replayed=true and performs no mutation.
+
 Each wisp is ONE iteration: check for work, patrol, pour the next
 iteration. On crash, re-read the formula steps and determine where
 you left off from context (bead state, mail state, last action).
@@ -510,9 +516,9 @@ blocker. Never burn surplus molecules or retry a pour outside this command.
 ```bash
 binding='{{binding_prefix}}'
 if [ -n "$binding" ]; then
-  gc "${binding%.}" witness-patrol next --binding-prefix "$binding"
+  gc "${binding%.}" witness-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding"
 else
-  gc witness-patrol next
+  gc witness-patrol next --completed-current "<confirmed-current-id>"
 fi
 ```
 

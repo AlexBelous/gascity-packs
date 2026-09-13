@@ -50,11 +50,17 @@ class City:
                     "schema_version": 1}
         elif args[:3] == ["bd", "mol", "wisp"]:
             self.mutations.append(("pour", "next"))
-            self.rows.append(row("next"))
+            next_row = row("next")
+            next_row["title"] = args[3]
+            self.rows.append(next_row)
             data = {"new_epic_id": "next"}
         elif args[:2] == ["bd", "update"]:
             self.mutations.append(("assign", args[2]))
             code = 1 if self.fail_assignment else 0
+            if code == 0:
+                for item in self.rows:
+                    if item["id"] == args[2]:
+                        item["assignee"] = args[3].split("=", 1)[1]
         elif args[:3] == ["bd", "mol", "burn"]:
             self.mutations.append(("burn", args[3]))
             self.rows = [item for item in self.rows if item["id"] != args[3]]
@@ -65,7 +71,8 @@ class City:
 
     def run(self, mode="next"):
         with patch.object(patrol.subprocess, "run", self.call):
-            return patrol.run(mode, ACTOR, {ACTOR}, "gastown.", self.checkpoints.append)
+            return patrol.run(mode, ACTOR, {ACTOR}, "gastown.", self.checkpoints.append,
+                              completed_current=self.current or "unknown")
 
 
 class PatrolTests(unittest.TestCase):

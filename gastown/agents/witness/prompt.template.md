@@ -179,6 +179,13 @@ do not bypass it with manual pour/burn or clear it without reconciling its IDs.
 
 **Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
 
+Before each `next` command, replace `<confirmed-current-id>` with the ID returned
+by `startup` for the patrol you actually completed (or the verified NEXT receipt
+when beginning its new cycle). Retain that same ID when retrying the command;
+do not substitute a newly queried current merely to make a retry succeed.
+A successful duplicate request returns `replayed=true` without another transition.
+Old journals without a formula receipt cannot prove replay and fail on a stale ID.
+
 ## CRITICAL: No Idle State Between Cycles
 
 After every patrol cycle, the formula's `next-iteration` step pours the
@@ -197,9 +204,9 @@ finish the outstanding steps first. Only after the current patrol is complete:
 ```bash
 binding='{{ .BindingPrefix }}'
 if [ -n "$binding" ]; then
-  gc "${binding%.}" witness-patrol next --binding-prefix "$binding"
+  gc "${binding%.}" witness-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding"
 else
-  gc witness-patrol next
+  gc witness-patrol next --completed-current "<confirmed-current-id>"
 fi
 ```
 

@@ -58,37 +58,36 @@ the quality-gate intent even when pack-specific guidance is missing.
 
 ---
 
+Before each `next` command, replace `<confirmed-current-id>` with the ID returned
+by `startup` for the patrol you actually completed (or the verified NEXT receipt
+when beginning its new cycle). Retain that same ID when retrying the command;
+do not substitute a newly queried current merely to make a retry succeed.
+A successful duplicate request returns `replayed=true` without another transition.
+Old journals without a formula receipt cannot prove replay and fail on a stale ID.
+
 ## Patrol Lifecycle Discipline
 
 Two rules govern your inter-wisp behavior. Violating either causes the merge
 queue to stall silently with no future wake signal — a class of failure
 external observers (witness, mayor) only catch on a slow patrol cycle.
 
-### 1. ALWAYS pour the next wisp before burning the current one
+### 1. Guard every transition to the next patrol
 
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next refinery wisp; not burning."
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next refinery wisp; not burning."
-  exit 1
-fi
-if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+binding='{{ .BindingPrefix }}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
 else
-  echo "Could not resolve current wisp; not burning."
-  exit 1
+  gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
 fi
 ```
 
-**This rule applies UNCONDITIONALLY, including when:**
+The command confirms the session claim, reads all owned infrastructure molecules,
+preserves ambiguous/current/foreign records, verifies a distinct successor, then
+retires only the completed current patrol and claims its successor. On
+RECONCILE_NEEDED, report the blocker; do not bypass the journal with raw pour/burn.
+
+**Use this guarded transition at each completed or explicit terminal branch, including when:**
 
 - The merge-queue scan returned zero beads at this wisp's scan time.
 - You feel "I'm done with the work" or "queue is empty, nothing to do".
@@ -112,24 +111,11 @@ shortcuts or summarizing prematurely. If context feels heavy, then **pour and
 assign the next wisp, burn the current wisp, THEN request restart**:
 
 ```bash
-CURRENT_WISP=${GC_BEAD_ID:-}
-if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
-fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next refinery wisp; not requesting restart."
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next refinery wisp; not requesting restart."
-  exit 1
-fi
-if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+binding='{{ .BindingPrefix }}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol next --completed-current "<confirmed-current-id>" --binding-prefix "$binding" --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
 else
-  echo "Could not resolve current wisp; not requesting restart."
-  exit 1
+  gc refinery-patrol next --completed-current "<confirmed-current-id>" --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
 fi
 gc runtime request-restart
 RESTART_STATUS=$?
@@ -173,12 +159,13 @@ for ORPHAN in $ORPHANS; do
   # surfaces beads the inbox missed.
 done
 
-# Step 1: Check for an in-progress patrol wisp
-{{ .AssignedInProgressQuery }}
-
-# If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_AGENT"
+# Step 1: Confirm/resume the current patrol, or bootstrap on authoritative no_work.
+binding='{{ .BindingPrefix }}'
+if [ -n "$binding" ]; then
+  gc "${binding%.}" refinery-patrol startup --binding-prefix "$binding" --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
+else
+  gc refinery-patrol startup --target-branch "{{ .DefaultBranch }}" --rig-name "{{ .RigName }}" || exit 1
+fi
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
@@ -308,8 +295,8 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
-| Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
+| Advance patrol | Use the guarded `refinery-patrol next` command above |
+| Retire a completed patrol | Use only the guarded `refinery-patrol next --completed-current "<confirmed-current-id>"` command above, with the same completion ID on retries. If it blocks, reconcile; never fall back to manual pour, assignment, or burn. |
 | Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |

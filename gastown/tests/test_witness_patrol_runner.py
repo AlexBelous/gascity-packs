@@ -28,7 +28,7 @@ sys.path.insert(0, os.environ["WITNESS_TEST_MODULES"])
 from test_witness_patrol import City
 p = pathlib.Path(os.environ["WITNESS_TEST_STATE"])
 s = json.loads(p.read_text())
-city = City(s["rows"], s.get("current"))
+city = City(s["rows"], s.get("current"), fail_assignment=s.get("fail_assignment", False))
 r = city.call(sys.argv)
 s.update(rows=city.rows, current=city.current)
 s.setdefault("commands", []).append(sys.argv[1:])
@@ -49,8 +49,11 @@ sys.exit(r.returncode)
                         WITNESS_TEST_STATE=str(self.state))
 
     def call(self, mode):
-        return subprocess.run([os.environ["GC_TEST_BIN"], "gastown", "witness-patrol",
-                               mode, "--binding-prefix", "gastown."],
+        args = [os.environ["GC_TEST_BIN"], "gastown", "witness-patrol",
+                mode, "--binding-prefix", "gastown."]
+        if mode == "next":
+            args.extend(["--completed-current", "current"])
+        return subprocess.run(args,
                               cwd=self.root, env=self.env, capture_output=True,
                               text=True, timeout=20)
 
@@ -63,6 +66,28 @@ sys.exit(r.returncode)
         state = json.loads(self.state.read_text())
         self.assertEqual(state["current"], "queued")
         self.assertEqual(state["mutations"], [["burn", "current"]])
+
+    def test_repeated_successful_next_replays_without_touching_successor(self):
+        self.state.write_text(json.dumps({"rows": [row("current"), row("queued")],
+                                         "current": "current"}))
+        self.assertEqual(self.call("next").returncode, 0)
+        before = self.state.read_text()
+        result = self.call("next")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["replayed"])
+        self.assertEqual(self.state.read_text(), before)
+
+    def test_old_success_journal_does_not_replay_or_retire_a_new_current(self):
+        self.state.write_text(json.dumps({"rows": [row("queued")], "current": "queued"}))
+        directory = self.root / ".gc/witness-patrol-locks"
+        directory.mkdir(parents=True)
+        journal = directory / (hashlib.sha256(ACTOR.encode()).hexdigest() + ".state.json")
+        journal.write_text(json.dumps({"pending": False, "result": {
+            "action": "advanced", "current": "current", "next": "queued"}}))
+        result = self.call("next")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("completed-current does not match", result.stderr)
+        self.assertEqual(json.loads(self.state.read_text())["mutations"], [])
 
     def test_registered_fresh_start_preserves_binding_and_no_work_protocol(self):
         self.state.write_text(json.dumps({"rows": [], "current": None}))
