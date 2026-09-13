@@ -277,7 +277,8 @@ def main():
         previous = state.get("result", {})
         if not isinstance(previous, dict):
             raise ReconcileNeeded("invalid transition receipt; preserve the journal")
-        if (args.mode in ("next", "recover") and state.get("formula") == args.formula
+        if (state.get("pending") is False
+                and args.mode in ("next", "recover") and state.get("formula") == args.formula
                 and previous.get("action") == "advanced"
                 and previous.get("current") == args.completed_current
                 and (args.mode != "recover" or previous.get("next") == args.expected_next)):

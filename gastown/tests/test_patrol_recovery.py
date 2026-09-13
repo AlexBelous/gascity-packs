@@ -156,6 +156,24 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(json.loads(output.getvalue())['replayed'])
             command.assert_not_called()
 
+    def test_pending_journal_with_old_success_cannot_bypass_recovery_checks(self):
+        lock_dir = self.root / '.gc/witness-patrol-locks'
+        lock_dir.mkdir(parents=True)
+        key = hashlib.sha256(ACTOR.encode()).hexdigest()
+        state = dict(self.state, formula='mol-witness-patrol',
+                     result={'action': 'advanced', 'current': 'old', 'next': 'next'})
+        (lock_dir / (key + '.state.json')).write_text(json.dumps(state))
+        city = RecoveryCity()
+        city.old_exists = True
+        with patch.dict(patrol.os.environ, {'GC_CITY_PATH': str(self.root), 'GC_AGENT': ACTOR,
+                                            'GC_TEMPLATE': ACTOR, 'GC_SESSION_ID': 'session-fixture'}), \
+                patch.object(patrol.sys, 'argv', ['patrol', 'recover', '--completed-current',
+                                                 'old', '--expected-next', 'next']), \
+                patch.object(patrol.subprocess, 'run', city.call):
+            with self.assertRaisesRegex(patrol.ReconcileNeeded, 'old patrol still exists'):
+                patrol.main()
+        self.assertEqual(city.claims, 0)
+
     def test_claim_timeout_budget_only_and_startup_timeout_never_pours(self):
         claim = subprocess.CompletedProcess([], 0, '{"ok":true,"action":"work","bead_id":"next"}', '')
         with patch.object(patrol.subprocess, 'run', return_value=claim) as run:
