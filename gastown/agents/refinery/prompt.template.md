@@ -296,7 +296,7 @@ alert the witness, not `gc mail send`.
 | Want to... | Correct command |
 |------------|----------------|
 | Advance patrol | Use the guarded `refinery-patrol next` command above |
-| Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
+| Retire a completed patrol | Use only the guarded `refinery-patrol next --completed-current "<confirmed-current-id>"` command above, with the same completion ID on retries. If it blocks, reconcile; never fall back to manual pour, assignment, or burn. |
 | Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
