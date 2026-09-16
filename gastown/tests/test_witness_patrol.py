@@ -29,9 +29,14 @@ class City:
         self.mutations = []
         self.checkpoints = []
         self.force_no_work = False
+        self.commands = []
 
     def call(self, command, **kwargs):
+        self.commands.append(command)
         args = command[1:]
+        if args[:1] == ["bd"]:
+            assert args[1:3] == ["--rig", "office-work"], command
+            args = ["bd", *args[3:]]
         code, data = 0, None
         if args == ["hook", "current", "--id-only"]:
             return subprocess.CompletedProcess(command, 0 if self.current else 1,
@@ -72,7 +77,7 @@ class City:
     def run(self, mode="next"):
         with patch.object(patrol.subprocess, "run", self.call):
             return patrol.run(mode, ACTOR, {ACTOR}, "gastown.", self.checkpoints.append,
-                              completed_current=self.current or "unknown")
+                              completed_current=self.current or "unknown", store_rig="office-work")
 
 
 class PatrolTests(unittest.TestCase):
@@ -157,7 +162,7 @@ class PatrolTests(unittest.TestCase):
         envelope = {"schema_version": 1, "issues": [row("current"), other],
                     "meta": {"count": 2, "skip_labels": True}}
         with patch.object(patrol, "gc", return_value=envelope):
-            self.assertEqual([item["id"] for item in patrol.inventory({ACTOR})], ["current"])
+            self.assertEqual([item["id"] for item in patrol.inventory({ACTOR}, "office-work")], ["current"])
 
     def test_inventory_rejects_malformed_or_truncated_envelopes(self):
         cases = [
@@ -170,11 +175,11 @@ class PatrolTests(unittest.TestCase):
         for envelope in cases:
             with self.subTest(envelope=envelope), patch.object(patrol, "gc", return_value=envelope):
                 with self.assertRaises(patrol.ReconcileNeeded):
-                    patrol.inventory({ACTOR})
+                    patrol.inventory({ACTOR}, "office-work")
 
     def test_inventory_keeps_legacy_array_compatibility(self):
         with patch.object(patrol, "gc", return_value=[row("current")]):
-            self.assertEqual(patrol.inventory({ACTOR}), [row("current")])
+            self.assertEqual(patrol.inventory({ACTOR}, "office-work"), [row("current")])
 
     def test_pending_journal_blocks_retry_before_any_gc_command(self):
         # Retain the tiny isolated fixture for inspection; never touch a city.
@@ -184,12 +189,52 @@ class PatrolTests(unittest.TestCase):
         key = hashlib.sha256(ACTOR.encode()).hexdigest()
         (lock_dir / (key + ".state.json")).write_text('{"pending":true,"phase":"pour"}')
         with patch.dict(patrol.os.environ, {"GC_CITY_PATH": str(city), "GC_AGENT": ACTOR,
-                                          "GC_SESSION_ID": "session-fixture"}), \
+                                          "GC_SESSION_ID": "session-fixture", "GC_RIG": "office-work",
+                                          "GC_TEMPLATE": ACTOR}), \
                 patch.object(patrol.sys, "argv", [str(SCRIPT), "startup"]), \
                 patch.object(patrol.subprocess, "run") as command:
             with self.assertRaisesRegex(patrol.ReconcileNeeded, "unfinished transition"):
                 patrol.main()
             command.assert_not_called()
+
+
+    def test_all_bd_operations_use_exact_expected_rig(self):
+        city = City([row("current")], "current")
+        city.run()
+        commands = [command for command in city.commands if command[1] == "bd"]
+        self.assertEqual(commands, [
+            ["gc", "bd", "--rig", "office-work", "list", "--type=molecule", "--include-infra",
+             "--all", "--skip-labels", "--limit=0", "--json"],
+            ["gc", "bd", "--rig", "office-work", "mol", "wisp", "mol-witness-patrol",
+             "--root-only", "--var", "binding_prefix=gastown.", "--json"],
+            ["gc", "bd", "--rig", "office-work", "update", "next", "--assignee=" + ACTOR],
+            ["gc", "bd", "--rig", "office-work", "list", "--type=molecule", "--include-infra",
+             "--all", "--skip-labels", "--limit=0", "--json"],
+            ["gc", "bd", "--rig", "office-work", "mol", "burn", "current", "--force"],
+        ])
+
+    def test_scope_mismatch_or_missing_scope_rejects_before_any_command(self):
+        for rig in [None, "other-rig", "", "../office-work", "--help"]:
+            with self.subTest(rig=rig), patch.object(patrol.subprocess, "run") as command:
+                with self.assertRaises(patrol.ReconcileNeeded):
+                    patrol.run("startup", ACTOR, {ACTOR}, "gastown.", lambda state: None,
+                               store_rig=rig)
+                command.assert_not_called()
+
+    def test_city_identity_cannot_be_coerced_into_rig_store(self):
+        with patch.object(patrol.subprocess, "run") as command:
+            with self.assertRaisesRegex(patrol.ReconcileNeeded, "city patrol identity"):
+                patrol.run("startup", "gastown.witness", {"gastown.witness"}, "gastown.",
+                           lambda state: None, store_rig="office-work")
+            command.assert_not_called()
+
+    def test_hq_store_is_retained_for_city_identity(self):
+        envelope = {"schema_version": 1, "issues": [], "meta": {"count": 0, "skip_labels": True}}
+        with patch.object(patrol, "gc", return_value=envelope) as command:
+            self.assertEqual(patrol.inventory({"gastown.witness"}, None), [])
+            self.assertEqual(command.call_args.args,
+                             ("bd", "list", "--type=molecule", "--include-infra", "--all",
+                              "--skip-labels", "--limit=0", "--json"))
 
 
 if __name__ == "__main__":

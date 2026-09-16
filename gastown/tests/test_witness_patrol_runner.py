@@ -43,14 +43,16 @@ sys.exit(r.returncode)
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("GC_", "BD_", "BEADS_", "DOLT_"))}
         self.env.update(PATH=str(binary) + os.pathsep + os.environ["PATH"],
-                        GC_AGENT=ACTOR, GC_ALIAS="witness-alias-a", GC_TEMPLATE=ACTOR,
+                        GC_CITY_PATH=str(self.root), GC_RIG="office-work", GC_AGENT=ACTOR, GC_ALIAS="witness-alias-a", GC_TEMPLATE=ACTOR,
                         GC_SESSION_ID="isolated-session", PYTHONDONTWRITEBYTECODE="1",
                         WITNESS_TEST_MODULES=str(Path(__file__).resolve().parent),
                         WITNESS_TEST_STATE=str(self.state))
 
-    def call(self, mode):
+    def call(self, mode, store_rig=None):
         args = [os.environ["GC_TEST_BIN"], "gastown", "witness-patrol",
                 mode, "--binding-prefix", "gastown."]
+        if store_rig is not None:
+            args.extend(["--store-rig", store_rig])
         if mode == "next":
             args.extend(["--completed-current", "current"])
         return subprocess.run(args,
@@ -95,7 +97,7 @@ sys.exit(r.returncode)
         self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads(self.state.read_text())
         self.assertEqual(state["current"], "next")
-        pour = next(args for args in state["commands"] if args[:3] == ["bd", "mol", "wisp"])
+        pour = next(args for args in state["commands"] if args[:5] == ["bd", "--rig", "office-work", "mol", "wisp"])
         self.assertIn("binding_prefix=gastown.", pour)
         self.assertEqual(state["mutations"], [["pour", "next"], ["assign", "next"]])
 
@@ -110,6 +112,32 @@ sys.exit(r.returncode)
             result = self.call("startup")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("another patrol transition is active", result.stderr)
+        self.assertNotIn("commands", json.loads(self.state.read_text()))
+
+
+    def test_wrong_runtime_or_explicit_scope_rejects_before_any_fixture_commands(self):
+        self.state.write_text(json.dumps({"rows": [], "current": None}))
+        self.env["GC_RIG"] = "other-rig"
+        result = self.call("startup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match scoped identity", result.stderr)
+        self.assertNotIn("commands", json.loads(self.state.read_text()))
+        self.assertFalse((self.root / ".gc/witness-patrol-locks").exists())
+
+    def test_explicit_scope_must_match_runtime_before_any_fixture_commands(self):
+        self.state.write_text(json.dumps({"rows": [], "current": None}))
+        result = self.call("startup", store_rig="other-rig")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match GC_RIG", result.stderr)
+        self.assertNotIn("commands", json.loads(self.state.read_text()))
+        self.assertFalse((self.root / ".gc/witness-patrol-locks").exists())
+
+    def test_scoped_alias_mismatch_rejects_before_any_fixture_commands(self):
+        self.state.write_text(json.dumps({"rows": [], "current": None}))
+        self.env["GC_ALIAS"] = "other-rig/gastown.witness"
+        result = self.call("startup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match scoped identity", result.stderr)
         self.assertNotIn("commands", json.loads(self.state.read_text()))
 
 
