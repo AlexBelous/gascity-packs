@@ -45,3 +45,24 @@ Gastown deliberately does not ship retired dog formulas for JSONL export or
 stale-session reaping. The Gas City builtin core pack provides JSONL export,
 stale-session and stale-data cleanup, and Dolt housekeeping as deterministic
 exec orders.
+
+### Patrol store scope
+
+The guarded `witness-patrol` and `refinery-patrol` commands use `GC_RIG` as the
+expected BD store. `--store-rig <rig>` may provide that scope explicitly, but
+must agree with a nonempty `GC_RIG` and all scoped agent/template/alias identities.
+Missing or conflicting scope fails before a claim or transition. City patrol
+identities retain HQ scope when `GC_RIG` is empty; a rig is never guessed from an
+issue ID. Refinery still requires `--target-branch` and `--rig-name`, with
+`--rig-name` matching the store scope. Existing formulas need no additional flag
+when runtime `GC_RIG` is supplied.
+
+Inventory, retirement lookup, pour, assignment and burn all use the same explicit
+`gc bd --rig <rig>` scope. Retirement is established by exit code 1 and the
+versioned structured NotFound response; presentation stderr is preserved as
+recovery evidence, without controlling authorization. New transition journals
+and recovery evidence record the store rig. Journals from earlier versions may
+omit it and remain recoverable only after runtime scope and all existing recovery
+guards pass. Run isolated command-dispatch tests with `GC_TEST_BIN=/path/to/gc`;
+the fixtures explicitly set `GC_CITY_PATH` so registry defaults cannot select a
+live city.

@@ -35,8 +35,25 @@ def gc(*args, protocol=False):
     return data
 
 
-def inventory(identities):
-    rows = gc("bd", "list", "--type=molecule", "--include-infra", "--all", "--skip-labels", "--limit=0", "--json")
+def validate_store(store_rig, identities):
+    """Use explicit runtime scope; never infer a store from an issue ID."""
+    if store_rig is not None and (not isinstance(store_rig, str) or not store_rig or "/" in store_rig
+                                   or any(char.isspace() for char in store_rig)
+                                   or store_rig.startswith("-")):
+        raise ReconcileNeeded("invalid patrol store rig")
+    for identity in identities:
+        if "/" in identity and identity.split("/", 1)[0] != store_rig:
+            raise ReconcileNeeded("patrol store rig does not match scoped identity")
+    return store_rig
+
+
+def bd_args(store_rig):
+    return ("bd", "--rig", store_rig) if store_rig else ("bd",)
+
+
+def inventory(identities, store_rig):
+    validate_store(store_rig, identities)
+    rows = gc(*bd_args(store_rig), "list", "--type=molecule", "--include-infra", "--all", "--skip-labels", "--limit=0", "--json")
     if isinstance(rows, dict):
         # bd --skip-labels uses a versioned envelope, not the legacy array.
         meta = rows.get("meta")
@@ -80,16 +97,17 @@ def select(rows, current, formula="mol-witness-patrol"):
     return others[0]["id"] if others else None
 
 
-def pour(actor, binding_prefix, checkpoint, formula="mol-witness-patrol", refinery_vars=None):
+def pour(actor, binding_prefix, checkpoint, formula="mol-witness-patrol", refinery_vars=None, store_rig=None):
+    validate_store(store_rig, {actor})
     checkpoint({"pending": True, "phase": "pour"})
     variables = ["--var", f"binding_prefix={binding_prefix}"]
     for key, value in (refinery_vars or {}).items():
         variables.extend(["--var", f"{key}={value}"])
-    result = gc("bd", "mol", "wisp", formula, "--root-only", *variables, "--json")
+    result = gc(*bd_args(store_rig), "mol", "wisp", formula, "--root-only", *variables, "--json")
     bead = result.get("new_epic_id") if isinstance(result, dict) else None
     if not bead:
         raise ReconcileNeeded("pour did not return a new root id; inspect before retry")
-    result = subprocess.run(["gc", "bd", "update", bead, f"--assignee={actor}"],
+    result = subprocess.run(["gc", *bd_args(store_rig), "update", bead, f"--assignee={actor}"],
                             capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise ReconcileNeeded(f"poured {bead} but assignment failed; reconcile before retry")
@@ -97,21 +115,24 @@ def pour(actor, binding_prefix, checkpoint, formula="mol-witness-patrol", refine
 
 
 def run(mode, actor, identities, binding_prefix, checkpoint,
-        formula="mol-witness-patrol", refinery_vars=None, completed_current=None):
+        formula="mol-witness-patrol", refinery_vars=None, completed_current=None, store_rig=None):
+    validate_store(store_rig, identities | {actor})
+    if store_rig and "/" not in actor:
+        raise ReconcileNeeded("city patrol identity cannot be coerced into a rig store")
     if mode == "next" and not completed_current:
         raise ReconcileNeeded("next requires --completed-current from this cycle startup receipt; retain that id for retries")
     if mode == "startup":
         # Claim protocol distinguishes healthy no_work from backend/claim errors.
         current = gc("hook", "--claim", "--json", protocol=True)
-        rows = inventory(identities)
+        rows = inventory(identities, store_rig)
         if current is None:
             if rows:
                 raise ReconcileNeeded("no_work conflicts with assigned active molecules")
-            new = pour(actor, binding_prefix, checkpoint, formula, refinery_vars)
+            new = pour(actor, binding_prefix, checkpoint, formula, refinery_vars, store_rig)
             current = gc("hook", "--claim", "--json", protocol=True)
             if current != new:
                 raise ReconcileNeeded(f"new patrol {new} was not claimed; do not pour again")
-            rows = inventory(identities)
+            rows = inventory(identities, store_rig)
         select(rows, current, formula)
         return {"action": "resume", "current": current}
 
@@ -122,18 +143,18 @@ def run(mode, actor, identities, binding_prefix, checkpoint,
         raise ReconcileNeeded("cannot confirm current session claim")
     if current != completed_current:
         raise ReconcileNeeded("completed-current does not match the session claim; preserve all patrols")
-    next_bead = select(inventory(identities), current, formula)
+    next_bead = select(inventory(identities, store_rig), current, formula)
     if not next_bead:
-        next_bead = pour(actor, binding_prefix, checkpoint, formula, refinery_vars)
+        next_bead = pour(actor, binding_prefix, checkpoint, formula, refinery_vars, store_rig)
     # Re-read after pour/assignment and before retiring the completed current.
-    if select(inventory(identities), current, formula) != next_bead or next_bead == current:
+    if select(inventory(identities, store_rig), current, formula) != next_bead or next_bead == current:
         raise ReconcileNeeded("successor changed; preserve all molecules")
     confirmed = subprocess.run(["gc", "hook", "current", "--id-only"],
                                capture_output=True, text=True, timeout=30)
     if confirmed.returncode or confirmed.stdout.strip() != current:
         raise ReconcileNeeded("session claim changed; preserve all molecules")
     checkpoint({"pending": True, "phase": "burn", "current": current, "next": next_bead})
-    result = subprocess.run(["gc", "bd", "mol", "burn", current, "--force"],
+    result = subprocess.run(["gc", *bd_args(store_rig), "mol", "burn", current, "--force"],
                             capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise ReconcileNeeded(f"could not retire {current}; queued successor is {next_bead}")
@@ -156,8 +177,9 @@ def recovery_current():
     raise ReconcileNeeded("cannot establish recovery session claim")
 
 
-def require_retired(bead):
-    result = subprocess.run(["gc", "bd", "--readonly", "show", bead, "--json"],
+def require_retired(bead, store_rig):
+    validate_store(store_rig, set())
+    result = subprocess.run(["gc", *bd_args(store_rig), "--readonly", "show", bead, "--json"],
                             capture_output=True, text=True, timeout=30)
     try:
         data = json.loads(result.stdout)
@@ -165,8 +187,7 @@ def require_retired(bead):
         raise ReconcileNeeded("retired patrol lookup is not authoritative NotFound") from exc
     if (result.returncode != 1 or not isinstance(data, dict)
             or type(data.get("schema_version")) is not int or data["schema_version"] != 1
-            or data.get("error") != "no issues found matching the provided IDs"
-            or f'no issue found matching "{bead}"' not in result.stderr):
+            or data.get("error") != "no issues found matching the provided IDs"):
         raise ReconcileNeeded("old patrol still exists or its absence cannot be established")
     return {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
@@ -179,14 +200,17 @@ def write_evidence(path, data):
         os.fsync(handle.fileno())
 
 
-def recover(state, state_path, identities, formula, completed, expected_next):
+def recover(state, state_path, identities, formula, completed, expected_next, store_rig=None):
+    validate_store(store_rig, identities)
+    if "store_rig" in state and state["store_rig"] != store_rig:
+        raise ReconcileNeeded("recovery journal store rig does not match runtime")
     if (state.get("pending") is not True or state.get("phase") not in ("burn", "claim")
             or not completed or not expected_next or completed == expected_next
             or state.get("current") != completed or state.get("next") != expected_next
             or state.get("formula", formula) != formula):
         raise ReconcileNeeded("recovery IDs/formula do not match a pending retirement")
-    absence = require_retired(completed)
-    rows = inventory(identities)
+    absence = require_retired(completed, store_rig)
+    rows = inventory(identities, store_rig)
     if len(rows) != 1 or select(rows, expected_next, formula) is not None:
         raise ReconcileNeeded("recovery needs exactly one verified owned successor")
     current = recovery_current()
@@ -208,7 +232,7 @@ def recover(state, state_path, identities, formula, completed, expected_next):
         if attempt.exists():
             raise ReconcileNeeded("prior recovery claim outcome is unknown; do not retry manually")
         write_evidence(attempt, {"original": str(archive), "formula": formula,
-                                "old_not_found": absence, "inventory": rows,
+                                "store_rig": store_rig, "old_not_found": absence, "inventory": rows,
                                 "claim_before": current, "claim_attempted": True})
         claimed = gc("hook", "--claim", "--json", protocol=True)
         if claimed != expected_next:
@@ -216,8 +240,8 @@ def recover(state, state_path, identities, formula, completed, expected_next):
     if recovery_current() != expected_next:
         raise ReconcileNeeded("recovery successor claim readback failed")
     # Recheck the store after claim. No recovery path pours or burns anything.
-    require_retired(completed)
-    rows = inventory(identities)
+    require_retired(completed, store_rig)
+    rows = inventory(identities, store_rig)
     if len(rows) != 1 or select(rows, expected_next, formula) is not None:
         raise ReconcileNeeded("recovery inventory changed after claim")
     result = {"action": "advanced", "current": completed, "next": expected_next,
@@ -225,7 +249,7 @@ def recover(state, state_path, identities, formula, completed, expected_next):
     evidence = archive.with_suffix(".verified.json")
     if not evidence.exists():
         write_evidence(evidence, {"result": result, "inventory": rows,
-                                  "claim_after": expected_next})
+                                  "claim_after": expected_next, "store_rig": store_rig})
     return result
 
 
@@ -239,6 +263,7 @@ def main():
     parser.add_argument("--expected-next")
     parser.add_argument("--target-branch")
     parser.add_argument("--rig-name")
+    parser.add_argument("--store-rig", help="expected BD rig; defaults to GC_RIG (empty for HQ)")
     args = parser.parse_args()
     if args.mode == "next" and not args.completed_current:
         raise ReconcileNeeded("next requires --completed-current from this cycle startup receipt; retain that id for retries")
@@ -255,6 +280,15 @@ def main():
     if not actor or not city or not session:
         raise ReconcileNeeded("city, agent and session identity are required")
     identities = {value for value in (actor, session, os.environ.get("GC_ALIAS")) if value}
+    runtime_rig = os.environ.get("GC_RIG") or None
+    store_rig = args.store_rig if args.store_rig is not None else runtime_rig
+    if args.store_rig is not None and runtime_rig is not None and store_rig != runtime_rig:
+        raise ReconcileNeeded("explicit patrol store rig does not match GC_RIG")
+    validate_store(store_rig, identities | {os.environ.get("GC_TEMPLATE") or actor})
+    if store_rig and "/" not in actor:
+        raise ReconcileNeeded("city patrol identity cannot be coerced into a rig store")
+    if refinery_vars and args.rig_name != store_rig:
+        raise ReconcileNeeded("refinery rig-name does not match patrol store rig")
     lock_dir = Path(city) / ".gc" / "witness-patrol-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / (hashlib.sha256((os.environ.get("GC_TEMPLATE") or actor).encode()).hexdigest() + ".lock")
@@ -274,6 +308,8 @@ def main():
                     or (state.get("pending") is not False and args.mode != "recover")):
                 raise ReconcileNeeded(f"unfinished transition; inspect {state_path} before retry")
 
+        if "store_rig" in state and state["store_rig"] != store_rig:
+            raise ReconcileNeeded("transition journal store rig does not match runtime")
         previous = state.get("result", {})
         if not isinstance(previous, dict):
             raise ReconcileNeeded("invalid transition receipt; preserve the journal")
@@ -287,7 +323,7 @@ def main():
 
         def checkpoint(state):
             # Persist before mutation: crash/timeout must not trigger a second pour.
-            state = dict(state, formula=args.formula)
+            state = dict(state, formula=args.formula, store_rig=store_rig)
             with state_path.open("w") as handle:
                 json.dump(state, handle)
                 handle.flush()
@@ -295,10 +331,10 @@ def main():
 
         if args.mode == "recover":
             result = recover(state, state_path, identities, args.formula,
-                             args.completed_current, args.expected_next)
+                             args.completed_current, args.expected_next, store_rig)
         else:
             result = run(args.mode, actor, identities, args.binding_prefix, checkpoint,
-                         args.formula, refinery_vars, args.completed_current)
+                         args.formula, refinery_vars, args.completed_current, store_rig)
         checkpoint({"pending": False, "formula": args.formula, "result": result})
         print(json.dumps(result))
 

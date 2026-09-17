@@ -27,14 +27,14 @@ class RefineryTests(unittest.TestCase):
             with patch.object(patrol.subprocess, "run", city.call):
                 with self.assertRaises(patrol.ReconcileNeeded):
                     patrol.run("next", REFINERY, {REFINERY}, "gastown.",
-                               city.checkpoints.append, FORMULA, VARIABLES, "current")
+                               city.checkpoints.append, FORMULA, VARIABLES, "current", "office-work")
             self.assertEqual(city.mutations, [])
 
     def test_missing_completed_current_never_runs_commands(self):
         with patch.object(patrol.subprocess, "run") as command:
             with self.assertRaises(patrol.ReconcileNeeded):
                 patrol.run("next", REFINERY, {REFINERY}, "gastown.", lambda state: None,
-                           FORMULA, VARIABLES)
+                           FORMULA, VARIABLES, store_rig="office-work")
             command.assert_not_called()
 
 
@@ -66,8 +66,8 @@ class RefineryRunnerTests(unittest.TestCase):
         result = self.call("startup")
         self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads(self.state.read_text())
-        pour = next(args for args in state["commands"] if args[:3] == ["bd", "mol", "wisp"])
-        self.assertEqual(pour[3], FORMULA)
+        pour = next(args for args in state["commands"] if args[:5] == ["bd", "--rig", "office-work", "mol", "wisp"])
+        self.assertEqual(pour[5], FORMULA)
         for variable in ("target_branch=main", "rig_name=office-work", "binding_prefix=gastown."):
             self.assertIn(variable, pour)
 
@@ -108,6 +108,17 @@ class RefineryRunnerTests(unittest.TestCase):
         result = self.call("startup")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unfinished transition", result.stderr)
+        self.assertNotIn("commands", json.loads(self.state.read_text()))
+
+
+    def test_refinery_rig_name_mismatch_rejects_before_any_claim(self):
+        self.state.write_text(json.dumps({"rows": [], "current": None}))
+        args = [os.environ["GC_TEST_BIN"], "gastown", "refinery-patrol", "startup",
+                "--target-branch", "main", "--rig-name", "other-rig"]
+        result = subprocess.run(args, cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rig-name does not match", result.stderr)
         self.assertNotIn("commands", json.loads(self.state.read_text()))
 
 
