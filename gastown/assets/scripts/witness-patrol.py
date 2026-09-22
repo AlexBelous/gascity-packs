@@ -200,7 +200,82 @@ def write_evidence(path, data):
         os.fsync(handle.fileno())
 
 
-def recover(state, state_path, identities, formula, completed, expected_next, store_rig=None):
+def evidence_peer(attempt, kind):
+    suffix = ".attempt.json"
+    if not attempt.name.endswith(suffix):
+        raise ReconcileNeeded("invalid recovery attempt evidence path")
+    return attempt.with_name(attempt.name[:-len(suffix)] + f".{kind}.json")
+
+
+def evidence_json(path, label):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ReconcileNeeded(f"invalid {label} evidence") from exc
+    if not isinstance(data, dict):
+        raise ReconcileNeeded(f"invalid {label} evidence")
+    return data
+
+
+def timeout_text(value):
+    if value is None:
+        return ""
+    return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+
+
+def claim_with_receipt(attempt, expected_next):
+    """Run at most one claim for an immutable attempt and persist its exact outcome."""
+    outcome = evidence_peer(attempt, "outcome")
+    if outcome.exists():
+        receipt = evidence_json(outcome, "claim outcome")
+    else:
+        command = ["gc", "hook", "--claim", "--json"]
+        session = os.environ.get("GC_SESSION_ID")
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=165)
+            receipt = {"schema_version": 1, "session_id": session, "command": command,
+                       "status": "completed", "exit": result.returncode,
+                       "stdout": result.stdout, "stderr": result.stderr}
+        except subprocess.TimeoutExpired as exc:
+            receipt = {"schema_version": 1, "session_id": session, "command": command,
+                       "status": "timeout", "exit": None,
+                       "stdout": timeout_text(exc.stdout), "stderr": timeout_text(exc.stderr)}
+        except OSError as exc:
+            receipt = {"schema_version": 1, "session_id": session, "command": command,
+                       "status": "exception", "exit": None, "stdout": "", "stderr": repr(exc)}
+        write_evidence(outcome, receipt)
+    if (type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+            or receipt.get("session_id") != os.environ.get("GC_SESSION_ID")
+            or receipt.get("command") != ["gc", "hook", "--claim", "--json"]
+            or receipt.get("status") not in ("completed", "timeout", "exception")
+            or not isinstance(receipt.get("stdout"), str)
+            or not isinstance(receipt.get("stderr"), str)):
+        raise ReconcileNeeded("claim outcome receipt is invalid or belongs to another session")
+    if receipt["status"] != "completed":
+        raise ReconcileNeeded(f"recovery claim {receipt['status']}; use guarded retry token after live reconciliation")
+    try:
+        data = json.loads(receipt["stdout"])
+    except ValueError as exc:
+        raise ReconcileNeeded("recorded recovery claim returned invalid JSON") from exc
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        raise ReconcileNeeded("recorded recovery claim failed")
+    if (receipt.get("exit") == 0 and data.get("action") == "work"
+            and data.get("bead_id")):
+        if data["bead_id"] != expected_next:
+            raise ReconcileNeeded("recorded recovery claim returned another bead")
+        return data["bead_id"]
+    if (receipt.get("exit") in (0, 1) and data.get("action") == "drain"
+            and data.get("reason") == "no_work"):
+        return None
+    raise ReconcileNeeded("recorded recovery claim did not report work or authoritative no_work")
+
+
+def retry_token(attempt):
+    return hashlib.sha256(attempt.read_bytes()).hexdigest()
+
+
+def recover(state, state_path, identities, formula, completed, expected_next, store_rig=None,
+            claim_retry_token=None, reconcile_only=False):
     validate_store(store_rig, identities)
     if "store_rig" in state and state["store_rig"] != store_rig:
         raise ReconcileNeeded("recovery journal store rig does not match runtime")
@@ -229,14 +304,57 @@ def recover(state, state_path, identities, formula, completed, expected_next, st
             os.fsync(handle.fileno())
     attempt = archive.with_suffix(".attempt.json")
     if current != expected_next:
-        if attempt.exists():
-            raise ReconcileNeeded("prior recovery claim outcome is unknown; do not retry manually")
-        write_evidence(attempt, {"original": str(archive), "formula": formula,
-                                "store_rig": store_rig, "old_not_found": absence, "inventory": rows,
-                                "claim_before": current, "claim_attempted": True})
-        claimed = gc("hook", "--claim", "--json", protocol=True)
+        if reconcile_only:
+            detail = (f"; retry-token={retry_token(attempt)}" if attempt.exists()
+                      else "; no prior claim attempt exists")
+            raise ReconcileNeeded(f"reconcile-only found no current successor{detail}")
+        if not attempt.exists():
+            if claim_retry_token:
+                raise ReconcileNeeded("claim retry token has no matching prior attempt")
+            write_evidence(attempt, {"schema_version": 1, "original": str(archive),
+                                    "formula": formula, "store_rig": store_rig,
+                                    "session_id": os.environ.get("GC_SESSION_ID"),
+                                    "expected_next": expected_next,
+                                    "old_not_found": absence, "inventory": rows,
+                                    "claim_before": current, "claim_attempted": True})
+            claim_attempt = attempt
+        else:
+            prior = evidence_json(attempt, "claim attempt")
+            token = retry_token(attempt)
+            retry = evidence_peer(attempt, "retry.attempt")
+            if retry.exists():
+                raise ReconcileNeeded("guarded recovery retry was already attempted; reconcile current claim only")
+            if claim_retry_token != token:
+                raise ReconcileNeeded(f"prior recovery claim requires live reconciliation; retry-token={token}")
+            prior_inventory = prior.get("inventory")
+            prior_expected = prior.get("expected_next")
+            if prior_expected is None and isinstance(prior_inventory, list) and len(prior_inventory) == 1:
+                # Compatibility for attempts written by the original guarded-recovery
+                # release.  The explicit token turns this into a recorded handoff; live
+                # current + two stable inventory reads remain authoritative.
+                prior_expected = prior_inventory[0].get("id")
+            if (prior.get("claim_attempted") is not True or prior_expected != expected_next
+                    or prior.get("formula") != formula or prior.get("store_rig") != store_rig):
+                raise ReconcileNeeded("prior recovery attempt does not identify this successor")
+            if current is not None or rows[0].get("status") != "open":
+                raise ReconcileNeeded("guarded retry requires no current claim and one open successor")
+            stable_rows = inventory(identities, store_rig)
+            if stable_rows != rows or len(stable_rows) != 1 or stable_rows[0].get("id") != expected_next:
+                raise ReconcileNeeded("successor inventory is not stable enough for guarded retry")
+            write_evidence(retry, {"schema_version": 1, "prior_attempt": str(attempt),
+                                  "prior_session_id": prior.get("session_id"),
+                                  "session_id": os.environ.get("GC_SESSION_ID"),
+                                  "expected_next": expected_next, "inventory": stable_rows,
+                                  "retry_token": claim_retry_token,
+                                  "legacy_handoff": not bool(prior.get("session_id"))})
+            claim_attempt = retry
+        try:
+            claimed = claim_with_receipt(claim_attempt, expected_next)
+        except ReconcileNeeded as exc:
+            raise ReconcileNeeded(f"{exc}; retry-token={retry_token(attempt)}") from exc
         if claimed != expected_next:
-            raise ReconcileNeeded("recovery claim did not return the recorded successor")
+            raise ReconcileNeeded(f"recovery claim did not return the recorded successor; "
+                                  f"retry-token={retry_token(attempt)}")
     if recovery_current() != expected_next:
         raise ReconcileNeeded("recovery successor claim readback failed")
     # Recheck the store after claim. No recovery path pours or burns anything.
@@ -264,9 +382,15 @@ def main():
     parser.add_argument("--target-branch")
     parser.add_argument("--rig-name")
     parser.add_argument("--store-rig", help="expected BD rig; defaults to GC_RIG (empty for HQ)")
+    parser.add_argument("--claim-retry-token",
+                        help="one-time guarded claim retry/handoff token emitted by recover")
+    parser.add_argument("--reconcile-only", action="store_true",
+                        help="inspect native current + inventory without issuing a claim")
     args = parser.parse_args()
     if args.mode == "next" and not args.completed_current:
         raise ReconcileNeeded("next requires --completed-current from this cycle startup receipt; retain that id for retries")
+    if args.reconcile_only and (args.mode != "recover" or args.claim_retry_token):
+        raise ReconcileNeeded("--reconcile-only is only valid for recover without a retry token")
     refinery_vars = None
     if args.formula == "mol-refinery-patrol":
         if not args.target_branch or not args.rig_name:
@@ -331,7 +455,8 @@ def main():
 
         if args.mode == "recover":
             result = recover(state, state_path, identities, args.formula,
-                             args.completed_current, args.expected_next, store_rig)
+                             args.completed_current, args.expected_next, store_rig,
+                             args.claim_retry_token, args.reconcile_only)
         else:
             result = run(args.mode, actor, identities, args.binding_prefix, checkpoint,
                          args.formula, refinery_vars, args.completed_current, store_rig)
