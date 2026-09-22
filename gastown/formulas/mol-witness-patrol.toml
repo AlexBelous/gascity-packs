@@ -537,6 +537,14 @@ and the completed current wisp was retired. Do not issue another burn. If the
 command failed, do not proceed to idle/restart; report RECONCILE_NEEDED with its
 evidence so the transition journal can be reconciled.
 
+If guarded `recover` emits `retry-token=...`, it has durably recorded the exact
+claim command outcome (session ID, exit, stdout and stderr). Re-run only after
+live `current` and authoritative inventory checks. `--reconcile-only` performs
+those checks without issuing a claim. Pass the emitted exact value as
+`--claim-retry-token`. The helper permits one claim handoff only when there is
+no current claim and the same single successor is `open` in two consecutive
+complete inventories. It never repeats a retry and still never pours or burns.
+
 **3. Context check:**
 
 If context feels heavy or RSS is high, request restart only after a successful
