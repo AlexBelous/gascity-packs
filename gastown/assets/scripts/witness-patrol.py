@@ -192,12 +192,23 @@ def require_retired(bead, store_rig):
     return {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
+def fsync_parent(path):
+    """Make a newly-created directory entry durable before reporting success."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory = os.open(path.parent, flags)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def write_evidence(path, data):
     # Exclusive, durable evidence: never overwrite the original pending journal.
     with path.open("x") as handle:
         json.dump(data, handle)
         handle.flush()
         os.fsync(handle.fileno())
+    fsync_parent(path)
 
 
 def evidence_peer(attempt, kind):
@@ -294,6 +305,21 @@ def recover(state, state_path, identities, formula, completed, expected_next, st
     original = state_path.read_bytes()
     key = hashlib.sha256(original).hexdigest()
     archive = state_path.with_name(state_path.name + "." + key + ".original")
+    attempt = archive.with_suffix(".attempt.json")
+    if reconcile_only:
+        if current != expected_next:
+            detail = (f"; retry-token={retry_token(attempt)}" if attempt.exists()
+                      else "; no prior claim attempt exists")
+            raise ReconcileNeeded(f"reconcile-only found no current successor{detail}")
+        if recovery_current() != expected_next:
+            raise ReconcileNeeded("reconcile-only successor claim readback failed")
+        require_retired(completed, store_rig)
+        checked_rows = inventory(identities, store_rig)
+        if len(checked_rows) != 1 or select(checked_rows, expected_next, formula) is not None:
+            raise ReconcileNeeded("reconcile-only inventory changed during verification")
+        return {"action": "reconciled", "current": completed, "next": expected_next,
+                "recovered": True, "reconcile_only": True, "mutation_free": True,
+                "journal": str(state_path)}
     if archive.exists():
         if archive.read_bytes() != original:
             raise ReconcileNeeded("original recovery journal archive mismatch")
@@ -302,12 +328,8 @@ def recover(state, state_path, identities, formula, completed, expected_next, st
             handle.write(original)
             handle.flush()
             os.fsync(handle.fileno())
-    attempt = archive.with_suffix(".attempt.json")
+        fsync_parent(archive)
     if current != expected_next:
-        if reconcile_only:
-            detail = (f"; retry-token={retry_token(attempt)}" if attempt.exists()
-                      else "; no prior claim attempt exists")
-            raise ReconcileNeeded(f"reconcile-only found no current successor{detail}")
         if not attempt.exists():
             if claim_retry_token:
                 raise ReconcileNeeded("claim retry token has no matching prior attempt")
@@ -460,7 +482,8 @@ def main():
         else:
             result = run(args.mode, actor, identities, args.binding_prefix, checkpoint,
                          args.formula, refinery_vars, args.completed_current, store_rig)
-        checkpoint({"pending": False, "formula": args.formula, "result": result})
+        if not args.reconcile_only:
+            checkpoint({"pending": False, "formula": args.formula, "result": result})
         print(json.dumps(result))
 
 

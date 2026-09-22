@@ -77,6 +77,61 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         return attempts[0]
 
+    def tree_bytes(self):
+        return {str(path.relative_to(self.root)): path.read_bytes()
+                for path in self.root.rglob('*') if path.is_file()}
+
+    def test_write_evidence_fsyncs_file_and_parent_directory(self):
+        path = self.root / 'durable.json'
+        real_open = os.open
+        real_fsync = os.fsync
+        real_close = os.close
+        with patch.object(patrol.os, 'open', wraps=real_open) as open_directory, \
+                patch.object(patrol.os, 'fsync', wraps=real_fsync) as fsync, \
+                patch.object(patrol.os, 'close', wraps=real_close) as close_directory:
+            patrol.write_evidence(path, {'schema_version': 1})
+        self.assertEqual(json.loads(path.read_text()), {'schema_version': 1})
+        open_directory.assert_called_once()
+        self.assertEqual(Path(open_directory.call_args.args[0]), self.root)
+        self.assertEqual(fsync.call_count, 2)
+        close_directory.assert_called_once_with(fsync.call_args_list[-1].args[0])
+
+    def test_main_reconcile_only_is_byte_identical_for_every_current_state(self):
+        for current in [None, 'old', 'next']:
+            with self.subTest(current=current):
+                self.setUp()
+                lock_dir = self.root / '.gc/witness-patrol-locks'
+                lock_dir.mkdir(parents=True)
+                key = hashlib.sha256(ACTOR.encode()).hexdigest()
+                lock = lock_dir / (key + '.lock')
+                lock.write_bytes(b'')
+                self.path = lock.with_suffix('.state.json')
+                self.path.write_text(self.original)
+                before = self.tree_bytes()
+                city = RecoveryCity(current)
+                env = {'GC_CITY_PATH': str(self.root), 'GC_AGENT': ACTOR,
+                       'GC_TEMPLATE': ACTOR, 'GC_ALIAS': ACTOR,
+                       'GC_SESSION_ID': 'session-fixture', 'GC_RIG': 'office-work'}
+                argv = ['patrol', 'recover', '--completed-current', 'old',
+                        '--expected-next', 'next', '--reconcile-only']
+                with patch.dict(patrol.os.environ, env), \
+                        patch.object(patrol.sys, 'argv', argv), \
+                        patch.object(patrol.subprocess, 'run', city.call), \
+                        patch.object(patrol.sys, 'stdout', io.StringIO()) as output:
+                    if current == 'next':
+                        patrol.main()
+                        result = json.loads(output.getvalue())
+                        self.assertEqual(result['action'], 'reconciled')
+                        self.assertTrue(result['mutation_free'])
+                    else:
+                        with self.assertRaisesRegex(
+                                patrol.ReconcileNeeded,
+                                'reconcile-only found no current successor'):
+                            patrol.main()
+                self.assertEqual(self.tree_bytes(), before)
+                self.assertEqual(city.claims, 0)
+                self.assertEqual(city.mutations, [])
+
     def test_recovery_claims_recorded_next_without_pour_or_burn(self):
         for current in ['old', None, 'next']:
             with self.subTest(current=current):
