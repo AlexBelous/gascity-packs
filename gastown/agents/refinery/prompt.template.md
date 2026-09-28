@@ -65,6 +65,12 @@ manually repeat hook claim, pour, burn, or clear the journal. Inspect first.
 A pending burn/claim can only be reconciled with guarded `recover`, supplying
 both the recorded --completed-current and --expected-next IDs. Recovery never
 pours or burns; it preserves the original journal and verifies the successor.
+The recovery receipt preserves session ID, exit, stdout and stderr. If recover
+emits `retry-token=...`, first use `--reconcile-only` for a mutation-free repeat
+of live current + complete inventory checks. Use the exact token with
+`--claim-retry-token` only after that review. The helper itself enforces no
+current claim, two identical reads of one `open`
+successor, and at most one retry/handoff.
 
 Before each `next` command, replace `<confirmed-current-id>` with the ID returned
 by `startup` for the patrol you actually completed (or the verified NEXT receipt

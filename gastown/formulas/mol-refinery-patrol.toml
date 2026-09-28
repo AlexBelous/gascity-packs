@@ -17,6 +17,11 @@ manually repeat hook claim, pour, burn, or clear the journal. Inspect first.
 A pending burn/claim can only be reconciled with guarded `recover`, supplying
 both the recorded --completed-current and --expected-next IDs. Recovery never
 pours or burns; it preserves the original journal and verifies the successor.
+It durably records the claim session, exit, stdout and stderr. Use
+`--reconcile-only` to repeat live checks without a claim. If it emits a
+`retry-token`, pass that exact value as `--claim-retry-token` only after checking
+live current + authoritative inventory; the helper allows one handoff only for
+no current claim and a twice-stable single `open` successor.
 
 Each wisp is ONE iteration: check for work, merge one branch, pour
 the next iteration. On crash, re-read the formula steps and determine
